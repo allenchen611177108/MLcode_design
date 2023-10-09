@@ -9,87 +9,129 @@ from torch.utils.data import Dataset
 from PIL import Image
 from torchvision import transforms
 
-class FCN(nn.Module):
-    def __init__(self, num_classes):
-        super(FCN, self).__init__()
+"""Learner Class
 
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),
-            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),
-            nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),
-            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2)
-        )
+Design Target：Use Factory Pattern to fulfill a learner can use for learning and meta-learning
+"""
+class Learner():
+    def __init__(self, model, hyper_param = {'lr':0.01, 'Epoch':50}, optimize_group = None):
+        self.Epoch = hyper_param['Epoch']
+        self.Model = model
 
-        self.feats1 = nn.Sequential(self.features[0:5])
-        self.feats2 = nn.Sequential(self.features[5:10])
-        self.feats3 = nn.Sequential(self.features[10:17])
-        self.feats4 = nn.Sequential(self.features[17:24])
-        self.feats5 = nn.Sequential(self.features[24:31])
+        if (optimize_group != None):
+            self.criterion = optimize_group['criterion']
+            self.optimizer = optimize_group['optimizer']
+            self.lrSchedular = optimize_group['lr_schedular']
+        else:
+            self.criterion = nn.CrossEntropyLoss()
+            self.optimizer = optim.SGD(self.Model.parameters(), momentum=0.9)
+            self.lrSchedular = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=50, gamma=0.5)
+        self.optimizer.lr = hyper_param['lr']
+    def Train(self):
+        pass
 
-        self.fconn = nn.Sequential(
-            nn.Conv2d(512, 2560, 7, padding=3),
-            nn.ReLU(inplace=True),
-            nn.Dropout(),
-            nn.Conv2d(2560, 2560, 1),
-            nn.ReLU(inplace=True),
-            nn.Dropout(),
-        )
+class SegLearner(Learner):
+    def __init__(self, model, hyper_param, optimize_group):
+        super().__init__(model, hyper_param, optimize_group)
 
-        self.score_feat3 = nn.Conv2d(256, num_classes, 1)
-        self.score_feat4 = nn.Conv2d(512, num_classes, 1)
-        self.score_fconn = nn.Conv2d(2560, num_classes, 1)
+    def Train(self, root, target, transform = None):
+        if(transform == None):
+            mask_trans = transforms.Compose([transforms.ToTensor()])
+            img_trans = transforms.Compose([transforms.ToTensor(),
+                                            transforms.Normalize(mean=[0.485,0.426,0.406], std=[0.229,0.224,0.225])])
+        else:
+            mask_trans = transforms['maskTransform']
+            img_trans = transforms['imageTransform']
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+        self.Model.cuda()
+        Dataset = dataset(root, img_trans=img_trans, mask_trans=mask_trans)
+        trainloader = torch.utils.data.DataLoader(Dataset, batch_size=1, shuffle=True, num_workers=0)
+        self.Model.train()
+        for epoch in range(self.Epoch):
+            print(epoch)
+            for i, data in enumerate(trainloader, 0):
+                img, mask = data[0].cuda(), data[1].cuda()
+                optimizer.zero_grad()
+                output = self.Model(img)
+                loss = criterion(output, mask).cpu()
+                loss.cpu().backward()
+                optimizer.step()
+                torch.cuda.empty_cache()
+                lr_scheduler.step()
+        torch.save(target)
 
-    def forward(self, x):
-        # Size of input=1,num_classes,256,256
-        feats1 = self.feats1(x)  # 1,128,64,64
-        feats2 = self.feats2(feats1)  # 1,256,32,32
-        feats3 = self.feats3(feats2)  # 1,512,16,16
-        feats4 = self.feats4(feats3)  # 1,512,8,8
-        feats5 = self.feats5(feats4)  # 1,512,8,8
-        fconn = self.fconn(feats5)  # 1,2560,8,8
+class MAMLLearner(Learner):
+    def __init__(self, model, hyper_param, optimize_group, meta_optimize=None, meta_param = {'lr':0.05, 'task_epoch':5}):
+        super().__init__(model, hyper_param, optimize_group)
+        self.meta_model = self.Model
+        self.Task_Epoch = meta_param['task_epoch']
+        if(meta_optimize == None):
+            self.meta_criterion = nn.CrossEntropyLoss()
+            self.meta_optimizer = optim.SGD(self.meta_model.parameters(), momentum=0.9)
+            self.metalr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.meta_optimizer, mode='min', factor=0.5,
+                                                                          patience=4, min_lr=0.000001, cooldown=1)
+        else:
+            self.meta_criterion = meta_optimize['criterion']
+            self.meta_optimizer = meta_optimize['optimizer']
+            self.metalr_scheduler = meta_optimize['lr_schedular']
+        self.meta_optimizer.lr = meta_param['lr']
 
-        score_feat3 = self.score_feat3(feats3)  # 1,num_classes,32,32
-        score_feat4 = self.score_feat4(feats4)  # 1,num_classes,16,16
-        score_fconn = self.score_fconn(fconn)  # 1,num_classes,8,8
+    def Train(self, root, target, transform = None):
+        if(transform == None):
+            mask_trans = transforms.Compose([transforms.ToTensor()])
+            img_trans = transforms.Compose([transforms.ToTensor(),
+                                            transforms.Normalize(mean=[0.485,0.426,0.406], std=[0.229,0.224,0.225])])
+        else:
+            mask_trans = transforms['maskTransform']
+            img_trans = transforms['imageTransform']
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 
-        score = func.upsample_bilinear(score_fconn, score_feat4.size()[2:])  # upsample_bilinear may be outdated
-        score += score_feat4
-        score = func.upsample_bilinear(score, score_feat3.size()[2:])
-        score += score_feat3
+        for i in range(self.Epoch):
+            print("Meta Epoch: %d \n" % i)
+            self.meta_optimizer.zero_grad()
+            meta_loss = 0
+            for site in os.listdir(root):
+                # every tasks
+                query_set = dataset(os.path.join(root, site, 'test'), img_trans=img_trans, mask_trans=mask_trans)
+                query_loader = torch.utils.data.DataLoader(query_set, batch_size=1, shuffle=True)
+                self.task_learn(os.path.join(root, site, 'train'))
+                query_img, query_mask = next(iter(query_loader))
+                query_img = query_img[0].squeeze()
+                query_mask = query_mask[0]
+                query_output = self.meta_model(query_img.cuda())
+                task_loss = self.criterion(query_output, query_mask.long().cuda())
+                task_loss.cpu()
+                print("task_loss: %f \n" % task_loss)
+                task_loss = task_loss.detach()
+                meta_loss = meta_loss + task_loss
+                torch.cuda.empty_cache()
+            self.optimizer.zero_grad()
+            meta_loss = meta_loss / len(os.listdir(root))
+            print("meta_loss: %f \n" % meta_loss)
+            meta_loss = Variable(meta_loss, requires_grad=True)
+            meta_loss.backward()
+            self.optimizer.step()
+            self.lr_scheduler.step(meta_loss)
+            torch.cuda.empty_cache()
+        torch.save({
+            'model_state_dict': self.Model.state_dict(),
+        }, target)
 
-        output = func.upsample_bilinear(score, x.size()[2:])  # 1,num_classes,256,256
-
-        return output
-
-img_transform = transforms.Compose([transforms.ToTensor()])
-mask_transform = transforms.Compose([transforms.ToTensor()])
+    def task_learn(self,path):
+        support_set = dataset(path, img_trans=self.img_trans, mask_trans=self.mask_trans)
+        support_loader = torch.utils.data.DataLoader(support_set, batch_size=self.Task_Epoch, shuffle=True)
+        for img, mask in iter(support_loader):
+            self.meta_optimizer.zero_grad()
+            img = img.cuda()
+            mask = mask.cuda()
+            output = self.meta_model(img)
+            loss = self.meta_criterion(output, mask.long().cuda())
+            loss.cpu()
+            print("loss: %f \n" % loss)
+            loss.backward()
+            self.meta_optimizer.step()
+            self.metalr_scheduler.step(loss)
+            torch.cuda.empty_cache()
 
 class dataset(Dataset):
     def __init__(self, root, img_trans = None, mask_trans = None):
