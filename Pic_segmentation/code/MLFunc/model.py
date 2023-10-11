@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 import torch.nn.functional as func
 
@@ -81,7 +80,5 @@ class FCN(nn.Module):
 
         return output
 
+
 model = FCN(num_classes=1)
-# print(model.parameters())
-# for param in model.parameters():
-#     print(param)
